@@ -81,6 +81,17 @@ final class Typo3Compatibility
     }
 
     /**
+     * Uid of the translation a language overlay was taken from, or null when the
+     * row was not overlaid. TYPO3 13 marks every overlay with "_LOCALIZED_UID",
+     * TYPO3 12 uses "_PAGES_OVERLAY_UID" for pages.
+     */
+    public static function overlayTranslationUid(array $overlaidRow): ?int
+    {
+        $uid = $overlaidRow['_LOCALIZED_UID'] ?? $overlaidRow['_PAGES_OVERLAY_UID'] ?? null;
+        return $uid !== null ? (int)$uid : null;
+    }
+
+    /**
      * Integer value of a t3ver_state. VersionState is a backed enum since
      * TYPO3 13 and a class with int constants in TYPO3 12.
      *

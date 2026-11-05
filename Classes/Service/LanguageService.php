@@ -308,11 +308,12 @@ class LanguageService implements SingletonInterface
     }
 
     /**
-     * Identifier of the default language (language 0) of the first site
+     * Identifier of the default language (language 0) of the page's site, or
+     * of the first site without a page
      */
-    public function getDefaultIsoCode(): ?string
+    public function getDefaultIsoCode(?int $pageId = null): ?string
     {
-        return $this->getIsoCodeFromUid(0);
+        return $this->getIsoCodeFromUid(0, $pageId);
     }
 
     /**
@@ -433,7 +434,7 @@ class LanguageService implements SingletonInterface
                     'uid' => $uid,
                     'isoCode' => $language['identifier'],
                     'title' => $language['title'],
-                    'locale' => $language['locale'],
+                    'locale' => (string)$language['locale'],
                     'enabled' => $language['enabled'],
                 ];
                 $seen[$uid] = true;

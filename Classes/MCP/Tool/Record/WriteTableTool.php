@@ -9,7 +9,9 @@ use Hn\McpServer\Event\AfterRecordWriteEvent;
 use Hn\McpServer\Event\BeforeRecordWriteEvent;
 use Hn\McpServer\Exception\DatabaseException;
 use Hn\McpServer\Exception\ValidationException;
+use Hn\McpServer\Service\InlineParentService;
 use Hn\McpServer\Service\LanguageService;
+use Hn\McpServer\Service\RecordUrlService;
 use Mcp\Types\CallToolResult;
 use Psr\EventDispatcher\EventDispatcherInterface;
 use TYPO3\CMS\Backend\Utility\BackendUtility;
@@ -26,6 +28,7 @@ use TYPO3\CMS\Core\Database\Query\Restriction\WorkspaceRestriction;
 class WriteTableTool extends AbstractRecordTool
 {
     protected LanguageService $languageService;
+    protected InlineParentService $inlineParentService;
 
     /**
      * Foreign fields of nested embedded children that still need to be pointed at their
@@ -39,6 +42,7 @@ class WriteTableTool extends AbstractRecordTool
     {
         parent::__construct();
         $this->languageService = GeneralUtility::makeInstance(LanguageService::class);
+        $this->inlineParentService = GeneralUtility::makeInstance(InlineParentService::class);
     }
 
     /**
@@ -55,11 +59,14 @@ class WriteTableTool extends AbstractRecordTool
         $languageHint = $hasMultipleLanguages
             ? ' Language fields (sys_language_uid) can be provided as language codes (e.g., "de", or "de-AT" where a site has several variants of a language) instead of numeric IDs.'
             : '';
+        $previewHint = GeneralUtility::makeInstance(RecordUrlService::class)->isPreviewLinkEnabled()
+            ? ' For records shown on the website, the result contains a preview_url: a temporary link that shows the unpublished change without login, offer it to the user to review the change.'
+            : '';
 
         return [
             'description' => 'Create, update, translate, or delete records in a TYPO3 workspace. ' .
                 'Changes are NOT published live — they land in a workspace and stay invisible to website visitors until a human editor publishes them in the TYPO3 backend. ' .
-                'This tool cannot publish; if the user wants the change live, tell them to publish the workspace in the TYPO3 backend (or ask an editor to), never claim the change is already live.' . $languageHint . ' ' .
+                'This tool cannot publish; if the user wants the change live, tell them to publish the workspace in the TYPO3 backend (or ask an editor to), never claim the change is already live.' . $previewHint . $languageHint . ' ' .
                 'Before creating or updating content, always use GetPage to understand the page structure, existing content, and writing style. ' .
                 'Check existing content elements with ReadTable to ensure new content fits the page\'s tone and doesn\'t duplicate existing elements. ' .
                 'For content creation, verify the appropriate colPos by examining existing content layout. ' .
@@ -88,7 +95,8 @@ class WriteTableTool extends AbstractRecordTool
                             'Uses the same field syntax as ReadTable output. ' .
                             'The target page is also specified here as "pid" — required on "create" (the page the record is created on); ' .
                             'on "update" setting "pid" moves the record to that page (combine with "position" to control where on the new page it lands; e.g. data: {"pid": 1} moves the record to page 1). ' .
-                            ($hasMultipleLanguages ? 'Language fields (sys_language_uid) accept ISO codes like "de", "fr" instead of numeric IDs. ' : '') .
+                            ($hasMultipleLanguages ? 'Language fields (sys_language_uid) accept ISO codes like "de", "fr" instead of numeric IDs. ' .
+                                '"update" never changes the language of a record; to translate a record use "translate", which creates a linked translation. ' : '') .
                             'Inline relations can be specified as arrays - UIDs for independent tables, record data for embedded tables. ' .
                             'For embedded tables (e.g. file references), the array fully replaces the existing list: ' .
                             'children present in the previous record but missing from the new array are deleted. ' .
@@ -350,6 +358,9 @@ class WriteTableTool extends AbstractRecordTool
         
         // Extract inline relations before converting data
         $inlineRelations = $this->extractInlineRelations($table, $data);
+
+        // Taken before the write, which takes listed children away from their current parent.
+        $previousInlineParents = $this->findParentsOfClaimedChildren($inlineRelations);
         
         // Convert data for storage
         $data = $this->convertDataForStorage($table, $data);
@@ -523,6 +534,9 @@ class WriteTableTool extends AbstractRecordTool
         // Get the live UID for workspace transparency
         $liveUid = $this->getLiveUid($table, $parentUid);
 
+        // A new inline child (e.g. tt_content pointing at a news record) changes its parent.
+        $this->inlineParentService->markModified($table, $liveUid, $previousInlineParents);
+
         $eventDispatcher = GeneralUtility::makeInstance(EventDispatcherInterface::class);
         $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'create', $liveUid, $data, $pid));
 
@@ -531,7 +545,7 @@ class WriteTableTool extends AbstractRecordTool
             'action' => 'create',
             'table' => $table,
             'uid' => $liveUid,
-        ]);
+        ] + $this->getRecordUrls($table, $liveUid));
     }
     
     /**
@@ -572,6 +586,13 @@ class WriteTableTool extends AbstractRecordTool
 
         // Resolve the live UID to workspace UID (once, used throughout)
         $workspaceUid = $this->resolveToWorkspaceUid($table, $uid);
+
+        // Taken before the write, which may point the record at another inline parent, or
+        // take listed children away from theirs.
+        $previousInlineParents = [
+            ...$this->inlineParentService->findParents($table, $uid),
+            ...$this->findParentsOfClaimedChildren($inlineRelations),
+        ];
 
         // Only run the field datamap if there are actual fields to write.
         // A pid-only move with no field changes leaves $data empty, and
@@ -637,6 +658,10 @@ class WriteTableTool extends AbstractRecordTool
             }
         }
 
+        // Like a backend form save: the record counts as modified even if only its inline
+        // children changed, and so do the inline parents it belongs to.
+        $this->inlineParentService->markModified($table, $uid, $previousInlineParents);
+
         // Suppressed when called as the inner step of translateRecord(), which
         // dispatches a single 'translate' event for the whole operation instead.
         if ($dispatchEvent) {
@@ -644,12 +669,13 @@ class WriteTableTool extends AbstractRecordTool
             $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'update', $uid, $data, null));
         }
 
-        // Return the result with the original live UID
+        // Return the result with the original live UID. The URLs are left to the
+        // caller when this is the inner step of translateRecord().
         return $this->createJsonResult([
             'action' => 'update',
             'table' => $table,
             'uid' => $uid, // Return the live UID that was passed in
-        ]);
+        ] + ($dispatchEvent ? $this->getRecordUrls($table, $uid) : []));
     }
     
     /**
@@ -679,6 +705,9 @@ class WriteTableTool extends AbstractRecordTool
             ]);
         }
 
+        // Once deleted, the record no longer leads to its inline parents.
+        $previousInlineParents = $this->inlineParentService->findParents($table, $uid);
+
         // Delete the record using DataHandler
         $dataHandler = GeneralUtility::makeInstance(DataHandler::class);
         $dataHandler->BE_USER = $GLOBALS['BE_USER'];
@@ -689,6 +718,8 @@ class WriteTableTool extends AbstractRecordTool
         if ($dataHandler->errorLog) {
             return $this->createErrorResult('Error deleting record: ' . implode(', ', $dataHandler->errorLog));
         }
+
+        $this->inlineParentService->markModified($table, $uid, $previousInlineParents);
 
         $eventDispatcher = GeneralUtility::makeInstance(EventDispatcherInterface::class);
         $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'delete', $uid, [], null));
@@ -1171,6 +1202,8 @@ class WriteTableTool extends AbstractRecordTool
         }
 
         if ($newTranslationUid) {
+            $this->inlineParentService->markModified($table, (int)$newTranslationUid);
+
             // Dispatch the same normalized representation that updateRecord()
             // persists (dates as timestamps etc.), not the raw tool input.
             $eventFieldValues = !empty($fieldValues) ? $this->convertDataForStorage($table, $fieldValues, (int)$newTranslationUid) : [];
@@ -1185,7 +1218,28 @@ class WriteTableTool extends AbstractRecordTool
             'translationUid' => $newTranslationUid ?: 'Translation created but UID not found',
             'targetLanguage' => $targetIsoCode,
             'targetLanguageLabel' => $this->languageService->formatLanguage($targetLanguageUid, $sitePageId),
-        ]);
+        ] + ($newTranslationUid ? $this->getRecordUrls($table, (int)$newTranslationUid) : []));
+    }
+
+    /**
+     * frontend_url / preview_url of a record that was just written, so the result
+     * of an edit can be shown right away. Empty for records without a frontend view.
+     *
+     * @return array{frontend_url?: string, preview_url?: string}
+     */
+    protected function getRecordUrls(string $table, int $uid): array
+    {
+        try {
+            $record = BackendUtility::getRecordWSOL($table, $uid);
+            if (!is_array($record)) {
+                return [];
+            }
+            return GeneralUtility::makeInstance(RecordUrlService::class)->getUrls($table, [$record])[0] ?? [];
+        } catch (\Throwable $e) {
+            // The write itself succeeded, a missing link must not turn it into an error
+            $this->logException($e, sprintf('resolving URLs of %s:%d', $table, $uid));
+            return [];
+        }
     }
 
     /**
@@ -1268,6 +1322,36 @@ class WriteTableTool extends AbstractRecordTool
         // Build merged record context for dynamic select item resolution (itemsProcFunc, TSconfig)
         if ($action === 'update' && $uid) {
             $existingRecord = BackendUtility::getRecord($table, $uid) ?? [];
+
+            // An update must never move a record into another language. An LLM that
+            // "translates" by updating the original would otherwise turn the
+            // default-language record itself into the translation: once published, the
+            // page vanishes from the default-language site, and the backend form can't
+            // change it back. Repeating the current value is harmless and stays allowed.
+            // Compare against the workspace version, which is what ReadTable shows and
+            // what this update writes to; it may differ from the live row.
+            $currentRecord = $existingRecord;
+            if ($currentRecord !== []) {
+                BackendUtility::workspaceOL($table, $currentRecord);
+                if (!is_array($currentRecord)) {
+                    $currentRecord = $existingRecord;
+                }
+            }
+            $languageControlFields = array_filter([
+                $this->tableAccessService->getLanguageFieldName($table),
+                $this->tableAccessService->getTranslationParentFieldName($table),
+            ]);
+            foreach ($languageControlFields as $controlField) {
+                if (!array_key_exists($controlField, $data) || !array_key_exists($controlField, $currentRecord)) {
+                    continue;
+                }
+                $newValue = $data[$controlField];
+                if (!is_numeric($newValue) || (int)$newValue !== (int)$currentRecord[$controlField]) {
+                    return "Field '{$controlField}': the language of an existing record can't be changed. "
+                        . "Use action 'translate' to create a translation.";
+                }
+            }
+
             $mergedRecord = array_merge($existingRecord, $data);
         } else {
             $mergedRecord = array_merge($data, ['pid' => $pid]);
@@ -1486,6 +1570,34 @@ class WriteTableTool extends AbstractRecordTool
         }
 
         return $inlineRelations;
+    }
+
+    /**
+     * The current inline parents of the independent children a write lists in its inline
+     * fields (e.g. content_elements: [300] on another news). The write points those children
+     * at the written record, so their current parents lose them.
+     *
+     * @return list<array{table: string, uid: int}>
+     */
+    protected function findParentsOfClaimedChildren(array $inlineRelations): array
+    {
+        $parents = [];
+        foreach ($inlineRelations as $relationData) {
+            $foreignTable = (string)($relationData['config']['foreign_table'] ?? '');
+            if ($foreignTable === ''
+                || empty($relationData['config']['foreign_field'])
+                || $this->tableAccessService->isEmbeddedChildTable($foreignTable)
+                || !is_array($relationData['value'])
+            ) {
+                continue;
+            }
+            foreach ($relationData['value'] as $childUid) {
+                if (is_numeric($childUid) && (int)$childUid > 0) {
+                    array_push($parents, ...$this->inlineParentService->findParents($foreignTable, (int)$childUid));
+                }
+            }
+        }
+        return $parents;
     }
 
     /**

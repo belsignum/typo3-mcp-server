@@ -224,7 +224,7 @@ class SearchTool extends AbstractRecordTool
         $searchResults = $this->performSearch($searchTerms, $termLogic, $table, $pageId, $limit, $languageId);
         
         // Format results
-        $formattedResults = $this->formatSearchResults($searchResults, $searchTerms, $termLogic, $languageId);
+        $formattedResults = $this->formatSearchResults($searchResults, $searchTerms, $termLogic, $languageId, $pageId);
         
         return $this->createSuccessResult($formattedResults);
     }
@@ -869,7 +869,7 @@ class SearchTool extends AbstractRecordTool
     /**
      * Format search results
      */
-    protected function formatSearchResults(array $searchResults, array $searchTerms, string $termLogic, ?int $languageId = null): string
+    protected function formatSearchResults(array $searchResults, array $searchTerms, string $termLogic, ?int $languageId = null, ?int $pageId = null): string
     {
 
         $result = "SEARCH RESULTS\n";
@@ -885,7 +885,7 @@ class SearchTool extends AbstractRecordTool
         }
 
         if ($languageId !== null) {
-            $result .= "Language Filter: " . $this->languageService->formatLanguage($languageId) . "\n";
+            $result .= "Language Filter: " . $this->languageService->formatLanguage($languageId, $pageId) . "\n";
         }
 
         $result .= "\n";

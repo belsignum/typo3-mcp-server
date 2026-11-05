@@ -211,6 +211,11 @@ class SiteLanguageIdentifierTest extends FunctionalTestCase
 
         $searchOnPage = (new SearchTool())->execute(['terms' => ['Kontakt'], 'language' => 'en', 'pageId' => 1]);
         $this->assertFalse($searchOnPage->isError, json_encode($searchOnPage->jsonSerialize()));
+
+        // The filter label names the language of the searched page's site
+        $searchOnSecondSite = (new SearchTool())->execute(['terms' => ['Second'], 'language' => 'en', 'pageId' => 51]);
+        $this->assertFalse($searchOnSecondSite->isError, json_encode($searchOnSecondSite->jsonSerialize()));
+        $this->assertStringContainsString('Language Filter: en (1, English)', $searchOnSecondSite->content[0]->text);
     }
 
     public function testPageOutputNamesTheVariant(): void

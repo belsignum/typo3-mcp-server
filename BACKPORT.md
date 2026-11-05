@@ -72,11 +72,13 @@ with "call to undefined method" and the method has to be added there.
 
 | Upstream call | Since | Replaced by | Files |
 |---|---|---|---|
-| `TcaSchemaFactory` (Schema API) | 13.2 | `Typo3Compatibility::getTcaSchemaFactory()` | `Service/TableAccessService.php` |
-| `->hasCapability(TcaSchemaCapability::Workspace)` | 13.2 | `->isWorkspaceAware()` (exists on both the core class and the stand-in) | `Service/TableAccessService.php` |
+| `TcaSchemaFactory` (Schema API) | 13.2 | `Typo3Compatibility::getTcaSchemaFactory()` | `Service/TableAccessService.php`, `Service/InlineParentService.php` |
+| `->hasCapability(TcaSchemaCapability::Workspace)` | 13.2 | `->isWorkspaceAware()` (exists on both the core class and the stand-in) | `Service/TableAccessService.php`, `Service/InlineParentService.php` |
 | `TcaFactory::get()` | 13.0 | `Typo3Compatibility::loadTca()` (`ExtensionManagementUtility::loadBaseTca()` on 12) | `Command/McpServerCommand.php`, `Service/BackendUserContextService.php` |
 | `Resource\Enum\DuplicationBehavior::RENAME` (enum) | 13.0 | `Typo3Compatibility::duplicationBehaviorRename()` (string constant on 12) | `Service/FileUploadService.php` |
 | `VersionState::X->value` (enum) | 13.0 | `Typo3Compatibility::versionStateValue('X')` (int constant on 12) | `Database/Query/Restriction/WorkspaceDeletePlaceholderRestriction.php` |
+| `VersionState::tryFrom($state) === VersionState::X` (enum) | 13.0 | Compare the int with `Typo3Compatibility::versionStateValue('X')` | `Service/RecordUrlService.php` |
+| `_LOCALIZED_UID` on page overlays | 13.0 | `Typo3Compatibility::overlayTranslationUid()` (TYPO3 12 marks page overlays with `_PAGES_OVERLAY_UID`) | `MCP/Tool/Record/AbstractRecordTool.php` |
 
 ### 3. Behaviour differences found by the test suite
 
@@ -113,7 +115,8 @@ Only where TYPO3 12 behaves differently from 13. All adapted tests still pass on
 | `PermissionEdgeCaseTest::testPartialTablePermissions` | Updates `tt_content:1`, which is not in the fixture; TYPO3 12 reports that | On 12 only assert that table access was granted |
 | `LanguageServiceTest`, `PermissionEdgeCaseTest`, `WriteTablePageTSconfigTest` | TYPO3 12 `SiteFinder` loads all sites in its constructor and caches them; site files written during a test are not seen | Reload sites after writing the file (`getAllSites(false)`), reset the `LanguageService` site list |
 | `SubdirectoryRoutingTest`, `UploadFileToolTest::testPresignedUploadUrlIncludesSubdirectoryPrefix` | Under testing-framework 8, `Environment::getCurrentScript()` points to phpunit, so `NormalizedParams::createFrom*()` computes a wrong site path | Construct `NormalizedParams` with explicit script and site path |
-| `FileUploadEndpointTest::testExpiredTokenIsRejected` | doctrine/dbal 3 renders `Connection::update()` with empty criteria as invalid SQL | Use the query builder |
+| `FileUploadEndpointTest::testExpiredTokenIsRejected`, `RecordUrlTest` (preview token tests) | doctrine/dbal 3 renders `Connection::update()` with empty criteria as invalid SQL | Use the query builder |
+| `RecordUrlTest` | Site configuration is written after the `SiteFinder` was created (see `LanguageServiceTest`) | Reload sites, reset the `LanguageService` site list |
 | `GetFlexFormSchemaToolTest::testTableWithoutTca` | `sys_log` still has TCA in TYPO3 12 | Use `sys_registry` |
 | `WriteTableToolTest::testFlexFormFieldHandling` | No `<?xml` prolog on 12 | Drop that assertion, the `T3FlexForms` check stays |
 | `TableAccessServiceTSconfigTest` | Was skipped below 13, passes on 12 | Skip only below 12 |
