@@ -83,7 +83,18 @@ jobs:
 
       - name: Install Playwright browsers
         working-directory: Build
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
+
+      # The system packages come from the runner's Ubuntu mirror. On ubuntu-latest
+      # only fonts are missing (the libraries Chromium needs are part of the image),
+      # and the E2E tests don't compare screenshots. When the mirror is unreachable,
+      # warn and carry on instead of failing the job; a library that is really
+      # missing still fails the test run with Playwright's own error.
+      - name: Install Playwright system dependencies
+        working-directory: Build
+        run: |
+          timeout 300 npx playwright install-deps chromium \
+            || echo "::warning title=Playwright system dependencies::Could not install them (Ubuntu mirror unreachable?); running with the packages of the runner image."
 
       - name: Run E2E test suite
         run: bash Build/runTests.sh -s e2e --no-docker
