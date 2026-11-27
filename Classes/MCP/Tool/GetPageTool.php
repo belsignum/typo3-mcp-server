@@ -110,7 +110,10 @@ class GetPageTool extends AbstractRecordTool
      */
     protected function doExecute(array $params): CallToolResult
     {
-        
+        // Reads pages directly, so the table access rules (incl. allowedTables /
+        // excludedTables) have to be checked here
+        $this->tableAccessService->validateTableAccess('pages');
+
         // Handle language parameter; a language code is resolved below, once the
         // page and with it the site is known
         $languageId = 0;
@@ -402,14 +405,20 @@ class GetPageTool extends AbstractRecordTool
         // Always include hidden records (like the TYPO3 backend does)
         $queryBuilder = $this->createRecordQueryBuilder($table);
 
+        $restriction = GeneralUtility::makeInstance(PageAccessService::class)->buildRecordRestriction($queryBuilder, $table);
+
         // First, get the total count of records
         $countQueryBuilder = clone $queryBuilder;
-        $totalCount = $countQueryBuilder->count('*')
+        $countQuery = $countQueryBuilder->count('*')
             ->from($table)
             ->where(
                 $countQueryBuilder->expr()->eq('pid', $countQueryBuilder->createNamedParameter($pageId, ParameterType::INTEGER)),
                 ...$this->getLanguageViewConditions($countQueryBuilder, $table, $languageId)
-            )
+            );
+        if ($restriction !== null) {
+            $countQuery->andWhere($restriction);
+        }
+        $totalCount = $countQuery
             ->executeQuery()
             ->fetchOne();
 
@@ -420,6 +429,9 @@ class GetPageTool extends AbstractRecordTool
                 $queryBuilder->expr()->eq('pid', $queryBuilder->createNamedParameter($pageId, ParameterType::INTEGER)),
                 ...$this->getLanguageViewConditions($queryBuilder, $table, $languageId)
             );
+        if ($restriction !== null) {
+            $query->andWhere($restriction);
+        }
 
         // Limit to 20 records per table
         $query->setMaxResults(20);

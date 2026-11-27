@@ -18,6 +18,7 @@ belongs to the upstream author on TER, this fork is distributed via Composer onl
   `main` was chosen over the `v0.6.2` tag because the commits after it fix a
   privilege escalation in the `where` filter (#126) and leaking exception details
   in `/mcp` responses (#134).
+- Last upstream merge: `main` at `387b85d` (2026-11-27).
 - License: GPL-2.0-or-later, unchanged. All changes are under the same license.
 
 ## Verification
@@ -27,13 +28,15 @@ The complete upstream functional test suite was run against each major version
 
 | TYPO3   | Result                                  |
 |---------|-----------------------------------------|
-| 12.4.45 | 782 tests, all passing, 1 skipped       |
-| 13.4.36 | 782 tests, all passing, 1 skipped       |
-| 14.3.9  | 782 tests, all passing, 6 skipped       |
+| 12.4.45 | 1043 tests, all passing, 2 skipped      |
+| 13.4.40 | 1043 tests, all passing, 2 skipped      |
+| 14.3.12 | 1043 tests, all passing, 6 skipped      |
 
-All skips are upstream's own version guards: the one on 12.4 and 13.4
-(`RequestGlobalTest::testRteLinkToPageCanBeWrittenThroughTheMcpEndpoint`) covers
-TYPO3 14 behaviour, the six on 14.3 cover APIs removed in 14.
+Run after the merge of upstream `main` at `387b85d`. All skips are upstream's
+own version guards: the two on 12.4 and 13.4
+(`RequestGlobalTest::testRteLinkToPageCanBeWrittenThroughTheMcpEndpoint`,
+`TableAccessServiceTranslateLabelTest::testTableSchemaContainsNoRawDomainReferences`)
+cover TYPO3 14 behaviour, the six on 14.3 cover APIs removed in 14.
 
 The CI matrix in `.github/workflows/tests.yml` contains 12.4 jobs, so every
 future change is checked against all three versions.
@@ -50,7 +53,9 @@ mechanical, which is what makes merging new upstream releases cheap.
 
 Nothing is detected by "is this TYPO3 12?" when a feature check works:
 `class_exists()` / `enum_exists()` decide which API is used, so the code keeps
-working if a version ships a class earlier or later than expected.
+working if a version ships a class earlier or later than expected. The one
+exception is `tcaDatabaseRecordProviders()` (section 3), where the difference
+lies in how extensions register providers, not in a core API.
 
 ## Changes to production code
 
@@ -76,18 +81,21 @@ with "call to undefined method" and the method has to be added there.
 | `->hasCapability(TcaSchemaCapability::Workspace)` | 13.2 | `->isWorkspaceAware()` (exists on both the core class and the stand-in) | `Service/TableAccessService.php`, `Service/InlineParentService.php` |
 | `TcaFactory::get()` | 13.0 | `Typo3Compatibility::loadTca()` (`ExtensionManagementUtility::loadBaseTca()` on 12) | `Command/McpServerCommand.php`, `Service/BackendUserContextService.php` |
 | `Resource\Enum\DuplicationBehavior::RENAME` (enum) | 13.0 | `Typo3Compatibility::duplicationBehaviorRename()` (string constant on 12) | `Service/FileUploadService.php` |
-| `VersionState::X->value` (enum) | 13.0 | `Typo3Compatibility::versionStateValue('X')` (int constant on 12) | `Database/Query/Restriction/WorkspaceDeletePlaceholderRestriction.php` |
+| `VersionState::X->value` (enum) | 13.0 | `Typo3Compatibility::versionStateValue('X')` (int constant on 12) | `Database/Query/Restriction/WorkspaceDeletePlaceholderRestriction.php`, `MCP/Tool/Record/ReadTableTool.php` |
 | `VersionState::tryFrom($state) === VersionState::X` (enum) | 13.0 | Compare the int with `Typo3Compatibility::versionStateValue('X')` | `Service/RecordUrlService.php` |
 | `_LOCALIZED_UID` on page overlays | 13.0 | `Typo3Compatibility::overlayTranslationUid()` (TYPO3 12 marks page overlays with `_PAGES_OVERLAY_UID`) | `MCP/Tool/Record/AbstractRecordTool.php` |
+| `RelationHandler::initializeForField()` | 13 (not in 12.4) | `Typo3Compatibility::initializeRelationHandlerForField()` (the 13.4 method ported onto `start()`) | `MCP/Tool/Record/ReadTableTool.php`, `MCP/Tool/Record/WriteTableTool.php` |
+| `ReferenceIndex::updateRefIndexTable($table, $uid, false, $workspace)` | 13 (not in 12.4) | `Typo3Compatibility::updateRefIndexTable()` (TYPO3 12 takes the workspace through `setWorkspaceId()` before the call) | `MCP/Tool/Record/WriteTableTool.php`, `Service/InlineParentService.php` |
 
 ### 3. Behaviour differences found by the test suite
 
 | Problem on TYPO3 12 | Fix | File |
 |---|---|---|
-| `WorkspaceService` and `DataHandler` read `$GLOBALS['LANG']` when listing/creating workspaces. Without it the automatic "MCP Workspace" creation fails and the tool silently falls back to the live workspace, so writes would go live. The HTTP and CLI entry points set `LANG`, this only hit direct callers, but the failure mode is severe. | `Typo3Compatibility::ensureLanguageService()` at the start of `switchToOptimalWorkspace()` | `Service/WorkspaceContextService.php` |
+| `WorkspaceService` and `DataHandler` read `$GLOBALS['LANG']` when listing/creating workspaces. Without it the automatic "MCP Workspace" creation fails and the tool silently falls back to the live workspace, so writes would go live. The HTTP and CLI entry points set `LANG`, this only hit direct callers, but the failure mode is severe. | Fixed upstream: `switchToOptimalWorkspace()` sets `LANG` itself since #153, and `WriteTable` refuses to write to live without a workspace. The former `Typo3Compatibility::ensureLanguageService()` was removed. | `Service/WorkspaceContextService.php` (upstream code, unchanged) |
 | TYPO3 12 stores FlexForm XML without the `<?xml` prolog. Read and write detected FlexForm XML only by that prolog, so on 12 `ReadTable` returned raw XML instead of the settings array. Also affects TYPO3 13 sites with records saved before an upgrade. | Accept `<T3FlexForms>` as start of the value as well | `MCP/Tool/Record/ReadTableTool.php`, `MCP/Tool/Record/WriteTableTool.php` |
 | `DataHandler::checkValueForCheck()` applies a bitmask without casting, so a non-numeric string for a checkbox throws a `TypeError` (TYPO3 13 casts to int first). | Cast non-numeric strings for `check` fields to int before handing them to DataHandler, matching TYPO3 13 | `MCP/Tool/Record/WriteTableTool.php` |
 | Nested file references (a file on an embedded inline child) used datamap keys `NEW<id>_<index>`. DataHandler's remap stack reads `a_b` as table `a`, uid `b`, which turns the reference into `NEW<id>_`. TYPO3 12's `FileExtensionFilter` throws on that, TYPO3 13 catches it and drops the reference (upstream then repairs the pointer). This is an upstream bug that TYPO3 13 hides. | Key without underscore (`NEW<id>n<index>`) for nested children | `MCP/Tool/Record/WriteTableTool.php` |
+| `NewRecordInitializer` (#186) runs the form data providers up to `DatabaseRowDateTimeFields` and finds the new-record initializers of extensions by their `before` on that provider. news 12 registers `NewsRowInitializeNew` (fills `datetime` with the current time) with `depends` on `DatabaseRowInitializeNew` only, news 14 adds the `before`. On TYPO3 12 a news record created without `datetime` was therefore refused as missing a required field. | `Typo3Compatibility::tcaDatabaseRecordProviders()`: on TYPO3 12 every provider that depends on `DatabaseRowInitializeNew` and does not itself need `DatabaseRowDateTimeFields` gets that `before`. This is a version check, because no API tells the two registration conventions apart. | `Service/NewRecordInitializer.php` |
 
 ### 4. Metadata
 
@@ -113,10 +121,11 @@ Only where TYPO3 12 behaves differently from 13. All adapted tests still pass on
 | `NewsLinkInlineTest`, `NewsContentElementsTest`, `ReadTableFieldFilterTest`, `InlineRelationWriteTest` | TYPO3 13 lets admins insert records on a non-existing page, TYPO3 12 rejects it. These tests wrote to pid 1 without a page fixture. | Import `pages.csv` |
 | `WriteTableToolErrorTest::testUpdateNonExistentRecord`, `::testCreateWithInvalidParent` | Same: TYPO3 12 logs an error for a missing record/page, which the tool reports | Expect `isError` on 12 |
 | `PermissionEdgeCaseTest::testPartialTablePermissions` | Updates `tt_content:1`, which is not in the fixture; TYPO3 12 reports that | On 12 only assert that table access was granted |
-| `LanguageServiceTest`, `PermissionEdgeCaseTest`, `WriteTablePageTSconfigTest` | TYPO3 12 `SiteFinder` loads all sites in its constructor and caches them; site files written during a test are not seen | Reload sites after writing the file (`getAllSites(false)`), reset the `LanguageService` site list |
+| `LanguageServiceTest`, `PermissionEdgeCaseTest`, `WriteTablePageTSconfigTest`, `WriteTableTypeTSconfigTest`, `RequiredFieldsTest` | TYPO3 12 `SiteFinder` loads all sites in its constructor and caches them; site files written during a test are not seen | Reload sites after writing the file (`getAllSites(false)`), reset the `LanguageService` site list |
 | `SubdirectoryRoutingTest`, `UploadFileToolTest::testPresignedUploadUrlIncludesSubdirectoryPrefix` | Under testing-framework 8, `Environment::getCurrentScript()` points to phpunit, so `NormalizedParams::createFrom*()` computes a wrong site path | Construct `NormalizedParams` with explicit script and site path |
 | `FileUploadEndpointTest::testExpiredTokenIsRejected`, `RecordUrlTest` (preview token tests) | doctrine/dbal 3 renders `Connection::update()` with empty criteria as invalid SQL | Use the query builder |
 | `RecordUrlTest` | Site configuration is written after the `SiteFinder` was created (see `LanguageServiceTest`) | Reload sites, reset the `LanguageService` site list |
+| `MmRelationWorkspaceTest` | news 12 declares the tag title `eval=unique`. TYPO3 12 `DataHandler` then renames the workspace version of a tag ("Tag C" becomes "Tag C0") and logs that as an error. news 14 no longer declares `unique`. | Remove `unique` from the tag title in `setUp()` |
 | `GetFlexFormSchemaToolTest::testTableWithoutTca` | `sys_log` still has TCA in TYPO3 12 | Use `sys_registry` |
 | `WriteTableToolTest::testFlexFormFieldHandling` | No `<?xml` prolog on 12 | Drop that assertion, the `T3FlexForms` check stays |
 | `TableAccessServiceTSconfigTest` | Was skipped below 13, passes on 12 | Skip only below 12 |
