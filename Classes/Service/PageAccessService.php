@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Hn\McpServer\Service;
 
 use Doctrine\DBAL\ParameterType;
+use Hn\McpServer\Database\Query\Restriction\WorkspaceDeletePlaceholderRestriction;
 use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Database\Query\QueryBuilder;
@@ -210,7 +211,9 @@ class PageAccessService implements SingletonInterface
     }
 
     /**
-     * Default-language pages whose $field is in $values and that grant "show".
+     * Default-language pages whose $field is in $values and that grant "show",
+     * as they are in the workspace: a page moved there is found below its new
+     * parent only, a page deleted there not at all. Returns live uids.
      *
      * @param int[] $values
      * @return int[]
@@ -224,11 +227,22 @@ class PageAccessService implements SingletonInterface
         $queryBuilder->getRestrictions()
             ->removeAll()
             ->add(GeneralUtility::makeInstance(DeletedRestriction::class))
-            ->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, $workspace));
+            ->add(GeneralUtility::makeInstance(WorkspaceRestriction::class, $workspace))
+            // Drops the live rows of pages moved or deleted in the workspace. The live
+            // row of a moved page keeps its old pid and would still match its old
+            // parent; the move pointer carries the new one.
+            ->add(GeneralUtility::makeInstance(WorkspaceDeletePlaceholderRestriction::class, $workspace));
+        $valueList = $queryBuilder->quoteArrayBasedValueListToIntegerList($values);
+        $match = $queryBuilder->expr()->in($field, $valueList);
+        if ($field === 'uid' && $workspace > 0) {
+            // A page looked up by uid that was moved in the workspace is only
+            // found through its move pointer, which has a uid of its own
+            $match = $queryBuilder->expr()->or($match, $queryBuilder->expr()->in('t3ver_oid', $valueList));
+        }
         $queryBuilder->select('uid', 't3ver_oid')
             ->from('pages')
             ->where(
-                $queryBuilder->expr()->in($field, $queryBuilder->quoteArrayBasedValueListToIntegerList($values)),
+                $match,
                 $queryBuilder->expr()->eq(
                     $GLOBALS['TCA']['pages']['ctrl']['languageField'] ?? 'sys_language_uid',
                     $queryBuilder->createNamedParameter(0, ParameterType::INTEGER)

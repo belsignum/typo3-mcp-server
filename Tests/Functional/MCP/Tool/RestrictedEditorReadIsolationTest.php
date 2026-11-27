@@ -369,6 +369,64 @@ class RestrictedEditorReadIsolationTest extends FunctionalTestCase
         $this->assertStringNotContainsString('Secret block', json_encode($result->jsonSerialize()));
     }
 
+    /**
+     * A page moved out of the mount in the workspace is outside the mount there,
+     * although its live row still has its old pid below the mount.
+     */
+    public function testPageMovedOutOfTheMountInTheWorkspaceIsNotReadable(): void
+    {
+        $this->importCSVDataSet(__DIR__ . '/../../Fixtures/restricted_editor_subpages.csv');
+        $this->movePageInEditorialWorkspace(23, self::UNMOUNTED_PAGE_UID);
+
+        $page = $this->getTool('GetPage')->execute(['uid' => 23]);
+        $pages = (new ReadTableTool())->execute(['table' => 'pages', 'limit' => 100]);
+
+        $this->assertTrue($page->isError, json_encode($page->jsonSerialize()));
+        $this->assertFalse($pages->isError, json_encode($pages->jsonSerialize()));
+        $this->assertSame([self::MOUNTED_PAGE_UID], array_column($this->decodeToolResult($pages)['records'], 'uid'));
+    }
+
+    public function testPageMovedIntoTheMountInTheWorkspaceIsReadable(): void
+    {
+        $this->movePageInEditorialWorkspace(self::UNMOUNTED_PAGE_UID, self::MOUNTED_PAGE_UID);
+
+        $result = $this->getTool('GetPage')->execute(['uid' => self::UNMOUNTED_PAGE_UID]);
+
+        $this->assertFalse($result->isError, json_encode($result->jsonSerialize()));
+        $this->assertStringContainsString('HTML block elsewhere', $result->content[0]->text);
+    }
+
+    public function testMountRootMovedInTheWorkspaceStaysReadable(): void
+    {
+        $this->movePageInEditorialWorkspace(self::MOUNTED_PAGE_UID, 2);
+
+        $result = $this->getTool('GetPage')->execute(['uid' => self::MOUNTED_PAGE_UID]);
+
+        $this->assertFalse($result->isError, json_encode($result->jsonSerialize()));
+        $this->assertStringContainsString('HTML block', $result->content[0]->text);
+    }
+
+    /**
+     * Moves a page as admin; the move is staged in the editorial workspace,
+     * live keeps the page at its old position.
+     */
+    private function movePageInEditorialWorkspace(int $uid, int $targetPid): void
+    {
+        $this->actAsBackendUser(1);
+        $move = (new WriteTableTool())->execute([
+            'action' => 'update',
+            'table' => 'pages',
+            'uid' => $uid,
+            'data' => ['pid' => $targetPid],
+        ]);
+        $this->assertFalse($move->isError, json_encode($move->jsonSerialize()));
+        $this->assertNotNull(
+            $this->fetchWorkspaceVersion('pages', $uid, self::EDITORIAL_WORKSPACE_UID),
+            'Precondition: the move is staged in the editorial workspace'
+        );
+        $this->actAsBackendUser(self::RESTRICTED_EDITOR_UID);
+    }
+
     private function getTool(string $name): ToolInterface
     {
         $tool = $this->get(ToolRegistry::class)->getTool($name);
