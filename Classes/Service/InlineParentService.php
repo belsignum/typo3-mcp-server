@@ -130,8 +130,48 @@ class InlineParentService
             $visited[$key] = true;
 
             $this->ensureWorkspaceVersion($record['table'], $record['uid']);
+            $this->updateReferenceIndex($record['table'], $record['uid']);
             array_push($queue, ...$this->findParents($record['table'], $record['uid']));
         }
+    }
+
+    /**
+     * Recompute the sys_refindex rows of a record's workspace version.
+     *
+     * The rows of an inline relation with a foreign_field belong to the parent, but
+     * DataHandler only reindexes the record it writes (and records already indexed as
+     * pointing at it). A child written on its own therefore leaves its parent's rows stale,
+     * and the workspace module, which groups parent and children into one collection by
+     * these rows, lists them separately.
+     */
+    protected function updateReferenceIndex(string $table, int $uid): void
+    {
+        if (!$this->isWorkspaceAware($table)) {
+            return;
+        }
+
+        $workspaceId = $this->getWorkspaceId();
+        $row = BackendUtility::getRecord($table, $uid, 'uid,t3ver_wsid');
+        if (!is_array($row)) {
+            return;
+        }
+        if ((int)$row['t3ver_wsid'] !== $workspaceId) {
+            // A live record: its version holds the workspace rows. Without one (e.g. the user
+            // may not edit it), the workspace module does not list the record at all.
+            $row = BackendUtility::getWorkspaceVersionOfRecord($workspaceId, $table, $uid, 'uid');
+            if (!is_array($row)) {
+                return;
+            }
+        }
+
+        Typo3Compatibility::updateRefIndexTable($table, (int)$row['uid'], $workspaceId);
+    }
+
+    protected function isWorkspaceAware(string $table): bool
+    {
+        $schemaFactory = Typo3Compatibility::getTcaSchemaFactory();
+        return $schemaFactory->has($table)
+            && $schemaFactory->get($table)->isWorkspaceAware();
     }
 
     /**
@@ -143,10 +183,7 @@ class InlineParentService
         $workspaceId = $this->getWorkspaceId();
         $backendUser = $GLOBALS['BE_USER'];
 
-        $schemaFactory = Typo3Compatibility::getTcaSchemaFactory();
-        $isWorkspaceAware = $schemaFactory->has($table)
-            && $schemaFactory->get($table)->isWorkspaceAware();
-        if (!$isWorkspaceAware || !$backendUser->check('tables_modify', $table)) {
+        if (!$this->isWorkspaceAware($table) || !$backendUser->check('tables_modify', $table)) {
             return;
         }
 

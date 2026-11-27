@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace Hn\McpServer\Compatibility;
 
 use Hn\McpServer\Compatibility\Schema\LegacyTcaSchemaFactory;
+use TYPO3\CMS\Backend\Form\FormDataProvider\DatabaseRowDateTimeFields;
+use TYPO3\CMS\Backend\Form\FormDataProvider\DatabaseRowInitializeNew;
+use TYPO3\CMS\Backend\Utility\BackendUtility;
+use TYPO3\CMS\Core\Database\ReferenceIndex;
+use TYPO3\CMS\Core\Database\RelationHandler;
 use TYPO3\CMS\Core\Information\Typo3Version;
-use TYPO3\CMS\Core\Localization\LanguageServiceFactory;
 use TYPO3\CMS\Core\Utility\ExtensionManagementUtility;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 
@@ -55,18 +59,6 @@ final class Typo3Compatibility
     }
 
     /**
-     * TYPO3 12 DataHandler and WorkspaceService read $GLOBALS['LANG'] while
-     * listing and creating workspaces, TYPO3 13 no longer does. Without it the
-     * MCP workspace creation fails and writes would fall back to live.
-     */
-    public static function ensureLanguageService(): void
-    {
-        if (!isset($GLOBALS['LANG'])) {
-            $GLOBALS['LANG'] = GeneralUtility::makeInstance(LanguageServiceFactory::class)->create('default');
-        }
-    }
-
-    /**
      * Conflict mode "rename" for ResourceStorage::addFile(). TYPO3 13 uses a
      * backed enum, TYPO3 12 the string constant of an Enumeration class.
      *
@@ -101,5 +93,121 @@ final class Typo3Compatibility
     {
         $state = constant(\TYPO3\CMS\Core\Versioning\VersionState::class . '::' . $name);
         return $state instanceof \BackedEnum ? (int)$state->value : (int)$state;
+    }
+
+    /**
+     * Rebuild the reference index rows of one record in a workspace. TYPO3 13 takes
+     * the workspace as argument of updateRefIndexTable(), TYPO3 12 as state set
+     * with setWorkspaceId() beforehand.
+     */
+    public static function updateRefIndexTable(string $tableName, int $uid, int $workspaceId): void
+    {
+        $referenceIndex = GeneralUtility::makeInstance(ReferenceIndex::class);
+        if (method_exists($referenceIndex, 'setWorkspaceId')) {
+            $referenceIndex->setWorkspaceId($workspaceId);
+            $referenceIndex->updateRefIndexTable($tableName, $uid);
+            return;
+        }
+        $referenceIndex->updateRefIndexTable($tableName, $uid, false, $workspaceId);
+    }
+
+    /**
+     * RelationHandler::initializeForField() exists since TYPO3 13. On TYPO3 12 the
+     * same arguments are passed to start(), as the TYPO3 13.4 implementation does:
+     * MM relations are stored for the version uid, all other relations for the
+     * live uid (t3ver_oid) of a versioned record.
+     *
+     * @param array|string|int|null $baseRecordOrUid Record with "uid" (and "t3ver_oid") or its uid
+     * @param string|int|float|array|null $currentValue Stored field value
+     */
+    public static function initializeRelationHandlerForField(
+        RelationHandler $relationHandler,
+        string $tableName,
+        array $fieldConfiguration,
+        array|string|int|null $baseRecordOrUid,
+        string|int|float|array|null $currentValue = null
+    ): void {
+        if (method_exists($relationHandler, 'initializeForField')) {
+            $relationHandler->initializeForField($tableName, $fieldConfiguration, $baseRecordOrUid, $currentValue);
+            return;
+        }
+
+        $manyToManyConfiguration = $fieldConfiguration['MM'] ?? '';
+        $recordUid = $baseRecordOrUid;
+        if (is_array($baseRecordOrUid)) {
+            $recordUid = (int)($baseRecordOrUid['uid'] ?? 0);
+            if (!$manyToManyConfiguration
+                && BackendUtility::isTableWorkspaceEnabled($tableName)
+                && ($baseRecordOrUid['t3ver_oid'] ?? 0) > 0
+            ) {
+                $recordUid = (int)$baseRecordOrUid['t3ver_oid'];
+            }
+        }
+
+        $relationHandler->registerNonTableValues = (bool)($fieldConfiguration['allowNonIdValues'] ?? false);
+        $foreignTable = $fieldConfiguration['allowed'] ?? $fieldConfiguration['foreign_table'] ?? '';
+        // type=file uses allowed AND foreign_table
+        if (($fieldConfiguration['type'] ?? '') === 'file') {
+            $foreignTable = $fieldConfiguration['foreign_table'];
+        }
+        $relationHandler->start(
+            is_array($currentValue) ? implode(',', $currentValue) : (string)$currentValue,
+            $foreignTable,
+            $manyToManyConfiguration,
+            $recordUid,
+            $tableName,
+            $fieldConfiguration
+        );
+    }
+
+    /**
+     * Form data providers of the tcaDatabaseRecord group, for NewRecordInitializer.
+     *
+     * NewRecordInitializer runs the providers up to DatabaseRowDateTimeFields and finds
+     * the initializers of extensions by their "before" on that provider, as news 14
+     * declares it for NewsRowInitializeNew (which fills "datetime"). Extensions for
+     * TYPO3 12 register such initializers with "depends" on DatabaseRowInitializeNew
+     * only (news 12), so on TYPO3 12 they would be left out. There each provider that
+     * depends on DatabaseRowInitializeNew and does not itself need
+     * DatabaseRowDateTimeFields gets that "before". No API tells the two conventions
+     * apart, hence the version check.
+     */
+    public static function tcaDatabaseRecordProviders(): array
+    {
+        $providers = $GLOBALS['TYPO3_CONF_VARS']['SYS']['formEngine']['formDataGroup']['tcaDatabaseRecord'];
+        if (!self::isTypo3V12()) {
+            return $providers;
+        }
+
+        $dateTimeFields = DatabaseRowDateTimeFields::class;
+        foreach ($providers as $providerClassName => $providerConfig) {
+            if ($providerClassName === $dateTimeFields
+                || !in_array(DatabaseRowInitializeNew::class, $providerConfig['depends'] ?? [], true)
+                || in_array($dateTimeFields, $providerConfig['before'] ?? [], true)
+                || self::providerDependsOn($providers, $providerClassName, $dateTimeFields)
+            ) {
+                continue;
+            }
+            $providers[$providerClassName]['before'][] = $dateTimeFields;
+        }
+        return $providers;
+    }
+
+    private static function providerDependsOn(array $providers, string $providerClassName, string $dependency): bool
+    {
+        $seen = [];
+        $pending = $providers[$providerClassName]['depends'] ?? [];
+        while ($pending !== []) {
+            $current = array_pop($pending);
+            if ($current === $dependency) {
+                return true;
+            }
+            if (isset($seen[$current])) {
+                continue;
+            }
+            $seen[$current] = true;
+            array_push($pending, ...($providers[$current]['depends'] ?? []));
+        }
+        return false;
     }
 }
